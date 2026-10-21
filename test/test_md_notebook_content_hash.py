@@ -168,6 +168,36 @@ async def test_deleted_note_with_base_hash_conflicts_then_recreates(fixtures) ->
 
 
 @pytest.mark.asyncio
+async def test_note_deleted_between_stat_and_read_is_the_deleted_conflict(
+    fixtures, monkeypatch
+) -> None:
+    """A deletion landing inside the hash check answers the -1 409, not a 404."""
+    _mod, remote, _seed = fixtures
+    async with signed_client(_mod) as client:
+        vault = await _clone(client, remote)
+        target = Path(vault["localPath"]) / "One.md"
+        _, read = await client.get("/api/note?path=One.md")
+
+        real_read = _mod.read_note_snapshot
+
+        async def deleted_after_stat(path: Path):
+            # The check's stat has already seen the note; delete it before the read.
+            if path == target and target.exists():
+                target.unlink()
+            return await real_read(path)
+
+        monkeypatch.setattr(_mod, "read_note_snapshot", deleted_after_stat)
+        status, body = await client.put(
+            "/api/note",
+            {"path": "One.md", "content": "mine", "baseHash": read["contentHash"]},
+        )
+        assert status == 409, body
+        assert body["code"] == "ESTALE"
+        assert body["mtime"] == -1
+        assert not target.exists()
+
+
+@pytest.mark.asyncio
 async def test_keep_mine_retries_against_the_conflict_hash(fixtures) -> None:
     _mod, remote, _seed = fixtures
     async with signed_client(_mod) as client:

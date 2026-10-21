@@ -696,15 +696,20 @@ async def _assert_note_is_fresh(
             await _raise_note_changed(abs_path, rel, current)
 
 
-async def _raise_note_changed(abs_path: Path, rel: str, current: float) -> NoReturn:
+async def _raise_note_changed(
+    abs_path: Path, rel: str, current: float, snap: Optional[tuple[str, str]] = None
+) -> NoReturn:
     """Raise the 409 ESTALE for a note that changed on disk, carrying the disk version.
 
     The conflict response hands this content back to the client, so it goes
     through the same gate as every other read: containment inside the vault says
     nothing about what the vault holds. Its ``contentHash`` is what lets "keep
-    my version" retry against exactly the bytes the user was shown.
+    my version" retry against exactly the bytes the user was shown. A caller
+    that already read the note passes that *snap*, so the 409 carries the very
+    bytes its check compared.
     """
-    snap = await read_note_snapshot(abs_path)
+    if snap is None:
+        snap = await read_note_snapshot(abs_path)
     if snap is None:
         raise ApiError(f"no such note: {rel}", 404, code="no_such_note")
     disk, disk_hash = snap
@@ -728,8 +733,14 @@ async def _assert_note_hash_matches(
     reported, and confirmed with ``baseMtime == -1``, exactly as on the mtime
     path, so "keep mine" has one escape hatch whichever token was sent.
     """
+    snap: Optional[tuple[str, str]] = None
     try:
         current = (await asyncio.to_thread(os.stat, abs_path)).st_mtime * 1000
+        snap = await read_note_snapshot(abs_path)
+        if snap is None:
+            # The read found nothing. If the note is gone, it was deleted between
+            # the stat and the read: the same conflict as a deletion the stat saw.
+            await asyncio.to_thread(os.stat, abs_path)
     except FileNotFoundError:
         if base_mtime == _RECREATE_SENTINEL:
             return
@@ -740,11 +751,10 @@ async def _assert_note_hash_matches(
             mtime=_RECREATE_SENTINEL,
             disk="",
         )
-    snap = await read_note_snapshot(abs_path)
     if snap is None:
         raise ApiError(f"no such note: {rel}", 404, code="no_such_note")
     if snap[1] != base_hash:
-        await _raise_note_changed(abs_path, rel, current)
+        await _raise_note_changed(abs_path, rel, current, snap)
 
 
 #: A note's sampled state for the tokenless save path: its mtime in ms and the
